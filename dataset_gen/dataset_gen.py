@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
+from pathlib import Path
 import random
 import threading
 import time
@@ -20,20 +21,33 @@ from rich.progress import (
 
 from falcon.TextGenerationInference import TGI, GenerateParameters, GenerateRequest
 
-THREAD_LOCK = threading.Lock()
-
 class Exercise(BaseModel):
     exercise_id: str
     problem: str
     solution: str
 
-
 class Result(BaseModel):
     prompt: str
     output: str
     
+class ExerciseSolutions(BaseModel):
+    exercise_id: str
+    problem: str
+    solutions: List[str]
+    
+class ExerciseTests(BaseModel):
+    exercise_id: str
+    problem: str
+    tests: List[str]
+    
 class Generator(Protocol):
     def generate(self, prompt: str) -> Result:
+        ...
+        
+    def generate_solutions(self, exercise: Exercise, n_solutions: int) -> ExerciseSolutions:
+        ...
+        
+    def generate_tests(self, exercise: Exercise, n_tests: int) -> ExerciseTests:
         ...
         
 class GenerationError(OpenAIError):
@@ -57,8 +71,23 @@ class MonkeyGenerator:
         #     raise GenerationError("Monkey failed")
         return Result(
             prompt=prompt,
-            output='def gorilla(): """Empty function for a gorilla""" return 0'
+            output='def gorilla(): """Empty function for a gorilla"""\n    return 0'
             * self.n_functions,
+        )
+
+    def generate_solutions(self, exercise: Exercise, n_solutions: int) -> ExerciseSolutions:
+        return ExerciseSolutions(
+            exercise_id=exercise.exercise_id,
+            problem=exercise.problem,
+            solutions=[f"\n    return {i}" for i in range(n_solutions)]
+        )
+
+    def generate_tests(self, exercise: Exercise, n_tests) -> ExerciseTests:
+        entry_point = get_function_name(exercise.problem)
+        return ExerciseTests(
+            exercise_id=exercise.exercise_id,
+            problem=f"{exercise.problem}\n    pass\n\n# check the correctness of {entry_point}\nassert ",
+            tests=[f"{entry_point}() == 0" for i in range(n_tests)]
         )
 
 class FalconGenerator:
@@ -93,6 +122,239 @@ class FalconGenerator:
         )
 
         return result
+    
+    def generate_solutions(self, exercise: Exercise, n_solutions: int) -> ExerciseSolutions:
+        model = TGI(endpoint_name=self.endpoint, region_name=self.region)
+        stop_words = ["\ndef", "\n#", "\n```"]
+        params = GenerateParameters( 
+                            max_new_tokens=512, 
+                            temperature=1, 
+                            stop =stop_words, 
+                            top_p = 0.95,
+                            do_sample=True,
+                            #return_log_probs = True,
+                            )
+        
+        requests = [GenerateRequest(exercise.problem, params) for i in range(n_solutions)]
+        results = model.create_from_objects(requests)
+        
+        return ExerciseSolutions(
+            exercise_id=exercise.exercise_id,
+            problem=exercise.problem,
+            solutions=results
+        )
+        
+    def generate_tests(self, exercise: Exercise, n_tests) -> ExerciseTests:
+        entry_point = get_function_name(exercise.problem)
+        
+        model = TGI(endpoint_name=self.endpoint, region_name=self.region)
+        stop_words = ["\ndef", "\n#", "\n```"]
+        params = GenerateParameters( 
+                            max_new_tokens=512, 
+                            temperature=1, 
+                            stop =stop_words, 
+                            top_p = 0.95,
+                            do_sample=True,
+                            #return_log_probs = True,
+                            )
+        problem=f"{exercise.problem}\n    pass\n\n# check the correctness of {entry_point}\nassert "
+        requests = [GenerateRequest(problem, params) for i in range(n_tests)]
+        results = model.create_from_objects(requests)
+        
+        return ExerciseTests(
+            exercise_id=exercise.exercise_id,
+            problem=problem,
+            tests=results
+        )
+        
+
+def get_function_name(problem: str):
+    return problem.split("def")[1].split('(')[0].strip()
+
+def mass_solutions_generation(
+    exercises: List[Exercise],
+    get_generator: Callable[[], Generator],
+    save_dir: str,
+    pool_size: int = 10,
+    retries: int = 10,
+    n_solutions: int = 5,
+):      
+    with Progress(
+        *Progress.get_default_columns(),
+        "•",
+        TimeElapsedColumn(),
+    ) as progress:
+        with ThreadPoolExecutor(max_workers=pool_size) as executor:
+            progress_task = progress.add_task(
+                "[red]Generating...",
+                total=len(exercises),
+            )
+
+            def update_progress():
+                progress.update(
+                    progress_task,
+                    advance=1,
+                )
+
+            tasks = []
+
+            for ex in exercises:
+                tasks.append(
+                    executor.submit(
+                        _solutions_generation_wrapper,
+                        ex,
+                        n_solutions,
+                        get_generator,
+                        update_progress,
+                        save_dir,
+                        retries,
+                    )
+                )
+
+            for task in tasks:
+                try:
+                    task.result()
+                except Exception as e:
+                    print(e)
+
+def _solutions_generation_wrapper(
+    exercise: Exercise,
+    n_solutions: int,
+    get_generator: Callable[[], Generator],
+    update_progress: Callable,
+    save_dir: str,
+    retries: int,
+):
+    file_path = os.path.join(save_dir, exercise.exercise_id + ".jsonl")
+
+    if os.path.exists(file_path):  # we don't regenerate each query
+        print(f"skip {file_path} generation because it already exist ")
+        return
+
+    generator = get_generator()
+
+    result = solutions_generation(exercise, n_solutions, generator, update_progress, retries)
+
+    write_solutions_to_jsonl(file_path, result)
+    
+def solutions_generation(
+    exercise: Exercise,
+    n_solutions: int,
+    generator: Generator,
+    update_progress: Callable,
+    retries: int,
+) -> ExerciseSolutions:
+    success = False
+    time.sleep(random.random())
+    for i in range(retries):
+        try:
+            result = generator.generate_solutions(exercise, n_solutions)
+            success = True
+        except GenerationError:
+            print(f"Generation failed for exercise {exercise}, retrying {i + 1}/{retries}")
+            time.sleep(1)
+        else:
+            break
+
+    if success:
+        update_progress()
+        return result
+    else:
+        print(f"Generation failed for exercise {exercise}, skipping")
+        return [ExerciseSolutions(exercise_id=exercise.exercise_id, problem=exercise.problem, solutions=[])]
+
+def mass_tests_generation(
+    exercises: List[Exercise],
+    get_generator: Callable[[], Generator],
+    save_dir: str,
+    pool_size: int = 10,
+    retries: int = 10,
+    n_solutions: int = 5,
+):      
+    with Progress(
+        *Progress.get_default_columns(),
+        "•",
+        TimeElapsedColumn(),
+    ) as progress:
+        with ThreadPoolExecutor(max_workers=pool_size) as executor:
+            progress_task = progress.add_task(
+                "[red]Generating...",
+                total=len(exercises),
+            )
+
+            def update_progress():
+                progress.update(
+                    progress_task,
+                    advance=1,
+                )
+
+            tasks = []
+
+            for ex in exercises:
+                tasks.append(
+                    executor.submit(
+                        _tests_generation_wrapper,
+                        ex,
+                        n_solutions,
+                        get_generator,
+                        update_progress,
+                        save_dir,
+                        retries,
+                    )
+                )
+
+            for task in tasks:
+                try:
+                    task.result()
+                except Exception as e:
+                    print(e)
+
+def _tests_generation_wrapper(
+    exercise: Exercise,
+    n_solutions: int,
+    get_generator: Callable[[], Generator],
+    update_progress: Callable,
+    save_dir: str,
+    retries: int,
+):
+    file_path = os.path.join(save_dir, exercise.exercise_id + ".jsonl")
+
+    if os.path.exists(file_path):  # we don't regenerate each query
+        print(f"skip {file_path} generation because it already exist ")
+        return
+
+    generator = get_generator()
+
+    result = tests_generation(exercise, n_solutions, generator, update_progress, retries)
+
+    write_tests_to_jsonl(file_path, result)
+    
+def tests_generation(
+    exercise: Exercise,
+    n_solutions: int,
+    generator: Generator,
+    update_progress: Callable,
+    retries: int,
+) -> ExerciseSolutions:
+    success = False
+    time.sleep(random.random())
+    for i in range(retries):
+        try:
+            result = generator.generate_tests(exercise, n_solutions)
+            success = True
+        except GenerationError:
+            print(f"Generation failed for exercise {exercise}, retrying {i + 1}/{retries}")
+            time.sleep(1)
+        else:
+            break
+
+    if success:
+        update_progress()
+        return result
+    else:
+        print(f"Generation failed for exercise {exercise}, skipping")
+        return [ExerciseTests(exercise_id=exercise.exercise_id, problem=exercise.problem, tests=[])]
+
 
 def mass_generation(
     prompts: List[str],
@@ -244,8 +506,23 @@ def check_exercise(exercise: str) -> bool:
     except IndexError:
         return False
 
-def write_results_to_jsonl(file_path: str, results: List[Exercise]):
+def write_results_to_jsonl(file_path: str, results: List[Exercise|ExerciseSolutions|ExerciseTests]):
     with open(file_path, "w") as file:
         for item in results:
             json.dump(item.dict(), file)
             file.write("\n")
+
+def load_exercises(path: Path) -> List[Exercise]:
+    with open(path, "r") as f:
+        lines = f.readlines()
+    return [Exercise.parse_raw(line) for line in lines]
+
+def write_solutions_to_jsonl(file_path: str, result: ExerciseSolutions):
+    with open(file_path, "w") as file:
+        json.dump(result.dict(), file)
+        file.write("\n")
+        
+def write_tests_to_jsonl(file_path: str, result: ExerciseTests):
+    with open(file_path, "w") as file:
+        json.dump(result.dict(), file)
+        file.write("\n")

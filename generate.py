@@ -8,8 +8,8 @@ from typer import Typer
 from rich.progress import track
 
 from dataset_gen.create_prompts import Query, Topic, create_prompts, create_prompt_query
-from dataset_gen.dataset_gen import FalconGenerator, MonkeyGenerator, load_leaves, load_prompts, mass_generation, write_results_to_jsonl
-from dataset_gen.filtering import load_and_filter_exos
+from dataset_gen.dataset_gen import FalconGenerator, MonkeyGenerator, load_exercises, load_leaves, load_prompts, mass_generation, mass_solutions_generation, mass_tests_generation, write_results_to_jsonl
+from dataset_gen.filtering import load_all_solutions, load_all_tests, load_and_filter_exos
 from falcon.TextGenerationInference import TGI, GenerateParameters, GenerateRequest
 
 app = Typer()
@@ -40,7 +40,7 @@ def generate(
 
     if not debug:
         def get_generator():
-            return FalconGenerator(endpoint)
+            return FalconGenerator(endpoint, region)
     else:
         def get_generator():
             return MonkeyGenerator(speed=debug_speed)
@@ -88,8 +88,84 @@ def prompts(
 def filter(exo_path: Path, dataset_file: str):
     print(exo_path)
     exos = load_and_filter_exos(exo_path)
-    print(len(exos))
     write_results_to_jsonl(dataset_file, exos)
+
+@app.command()
+def filter_solutions(solutions_path: Path, dataset_file: str):
+    print(solutions_path)
+    items = load_all_solutions(solutions_path)
+    write_results_to_jsonl(dataset_file, items)
+
+@app.command()
+def filter_tests(tests_path: Path, dataset_file: str):
+    print(tests_path)
+    items = load_all_tests(tests_path)
+    write_results_to_jsonl(dataset_file, items)
+
+@app.command()
+def solutions(exercise_path: Path,
+              output_path: str,
+              n_samples: int,
+              endpoint: str,
+              region: str = "us-west-2",
+              debug: bool = False,
+              debug_speed: int = 2,
+              pool_size: int = 8,
+              retries: int = 5,
+):
+    exercises = load_exercises(exercise_path)
+    
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+
+    if not debug:
+        def get_generator():
+            return FalconGenerator(endpoint, region)
+    else:
+        def get_generator():
+            return MonkeyGenerator(speed=debug_speed)
+    
+    mass_solutions_generation(
+        exercises,
+        get_generator,
+        save_dir=output_path,
+        pool_size=pool_size,
+        retries=retries,
+        n_solutions=n_samples,
+    )
+    
+@app.command()
+def tests(exercise_path: Path,
+              output_path: str,
+              n_samples: int,
+              endpoint: str,
+              region: str = "us-west-2",
+              debug: bool = False,
+              debug_speed: int = 2,
+              pool_size: int = 8,
+              retries: int = 5,
+):
+    exercises = load_exercises(exercise_path)
+    
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+
+    if not debug:
+        def get_generator():
+            return FalconGenerator(endpoint, region)
+    else:
+        def get_generator():
+            return MonkeyGenerator(speed=debug_speed)
+    
+    mass_tests_generation(
+        exercises,
+        get_generator,
+        save_dir=output_path,
+        pool_size=pool_size,
+        retries=retries,
+        n_solutions=n_samples,
+    )
+
 
 if __name__ == "__main__":
     app()
