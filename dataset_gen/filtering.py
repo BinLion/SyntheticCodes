@@ -1,9 +1,33 @@
+import json
 from typing import List, Union
 import os
 from pathlib import Path
 
 from dataset_gen.dataset_gen import Exercise, ExerciseSolutions, ExerciseTests
 
+def read_jsonl(file_path):
+    with open(file_path, 'r') as file:
+        return {json.loads(line)['exercise_id']: json.loads(line) for line in file}
+
+def merge_dicts(dict1, dict2):
+    """ Merge dictionaries based on shared keys (id). """
+    merged_dict = {}
+    for key in dict1:
+        if key in dict2:  # Check if the key exists in both dictionaries
+            # Create a new entry with merged data from both dictionaries
+            merged_entry = dict1[key].copy()  # Start with the first dict's data
+            merged_entry.update(dict2[key])  # Update with the second dict's data
+            merged_dict[key] = merged_entry
+    return merged_dict
+
+def write_jsonl(data, file_path):
+    with open(file_path, 'w') as file:
+        for item in data.values():
+            file.write(json.dumps(item) + '\n')
+            
+def load_solutions_with_tests(file_path):
+    with open(file_path, 'r') as file:
+        return [json.loads(line) for line in file]
 
 def load_one_file(path: Union[Path, str]) -> List[Exercise]:
     with open(path, "r") as f:

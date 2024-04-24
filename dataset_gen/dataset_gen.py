@@ -39,6 +39,12 @@ class ExerciseTests(BaseModel):
     exercise_id: str
     problem: str
     tests: List[str]
+
+class ExerciseWithSolutionsAndTests(BaseModel):
+    exercise_id: str
+    problem: str
+    solutions: List[str]
+    tests: List[str]
     
 class Generator(Protocol):
     def generate(self, prompt: str) -> Result:

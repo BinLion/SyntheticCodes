@@ -7,9 +7,10 @@ import pandas as pd
 from typer import Typer
 from rich.progress import track
 
+from codeT.execution import best_solution, pass_most_solution
 from dataset_gen.create_prompts import Query, Topic, create_prompts, create_prompt_query
 from dataset_gen.dataset_gen import FalconGenerator, MonkeyGenerator, load_exercises, load_leaves, load_prompts, mass_generation, mass_solutions_generation, mass_tests_generation, write_results_to_jsonl
-from dataset_gen.filtering import load_all_solutions, load_all_tests, load_and_filter_exos
+from dataset_gen.filtering import load_all_solutions, load_all_tests, load_and_filter_exos, load_solutions_with_tests, read_jsonl, merge_dicts, write_jsonl
 from falcon.TextGenerationInference import TGI, GenerateParameters, GenerateRequest
 
 app = Typer()
@@ -165,6 +166,37 @@ def tests(exercise_path: Path,
         retries=retries,
         n_solutions=n_samples,
     )
+
+@app.command()
+def merge(
+    solutions_path: Path,
+    test_cases_path: Path,
+    output_path: str      
+):
+    solutions = read_jsonl(solutions_path)
+    tests = read_jsonl(test_cases_path)
+    merged_data = merge_dicts(tests, solutions)
+    write_jsonl(merged_data, output_path)
+    
+
+@app.command()
+def codet(
+    data_path: Path,
+    output_path: str
+):
+    data = load_solutions_with_tests(data_path)
+    dataset = []
+    for item in data:
+        result = best_solution(item, 0.5, 5)
+        best = pass_most_solution(result)
+        if best is None:
+            print(f"exercise {item['exercise_id']} solutions failed all test cases")
+            continue
+        dataset.append({"exercise_id": best['task_id'], "problem": best['prompt'], "solution": best['completion']})
+
+    with open(output_path, 'w') as file:
+        for item in dataset:
+            file.write(json.dumps(item) + '\n')
 
 
 if __name__ == "__main__":
